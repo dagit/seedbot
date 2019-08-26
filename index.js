@@ -8,7 +8,7 @@ client.on('ready', () => {
 
 client.on('message', msg => {
   if (!msg.content.startsWith(config.prefix)) return;
-  if (msg.content.startsWith(config.prefix + 'roll') || message.author.bot) {
+  if (msg.content.startsWith(config.prefix + 'roll') || msg.author.bot) {
     const seed = Math.abs(Math.trunc(Math.random() * 0x7FFFFFFF));
     const alphaSeed = Convert10To26(seed);
     msg.reply('Your seed is: ' + alphaSeed);
