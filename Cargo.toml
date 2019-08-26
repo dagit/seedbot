@@ -1,0 +1,23 @@
+[package]
+name = "seedbot"
+version = "0.1.0"
+authors = ["Jason Dagit <dagit@galois.com>"]
+edition = "2018"
+license = "BSD-3-Clause"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[profile.dev]
+opt-level = 2
+debug = true
+
+[dependencies]
+irc = "0.13"
+serde = "1.0"
+serde_json = "1.0"
+rand = "0.7"
+
+[dependencies.serenity]
+version = "0.6"
+default-features = false
+features = ["default_native_tls"]
