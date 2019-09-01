@@ -139,6 +139,22 @@ fn main() {
                         },
                     };
                 }
+                // Join any mega man hacks race room and just chill
+                if irc_msg.source_nickname() == Some(&RACEBOT) &&
+                    !godot1.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    let re = Regex::new(ROOM).expect("Failed to build regex");
+                    println!("message = '{}'", &message);
+                    let chan = re.captures(&message)
+                        .map(|c| c.name("chan"));
+                    match chan.and_then(std::convert::identity) {
+                        None => (),
+                        Some(c) => {
+                            println!("joining {}", c.as_str());
+                            client.send_join(&c.as_str()).expect("Failed to join race channel");
+                        },
+                    };
+                }
                 if message.starts_with(".botenter") || message.starts_with(".botjoin") {
                     let ch = irc_msg.response_target().unwrap_or(&channel);
                     client.send_privmsg(&ch, ".enter").expect("Failed send_privmsg");
