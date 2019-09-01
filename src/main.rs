@@ -45,7 +45,7 @@ impl std::fmt::Debug for ContextWrapper {
 group!({
     name: "general",
     options: {},
-    commands: [ping, irc, /*roll*/], // TODO: reenable this command (for example, when retiring js version)
+    commands: [ping, irc, roll],
 });
 
 struct Chan;
