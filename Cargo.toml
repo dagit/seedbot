@@ -22,6 +22,7 @@ failure = "0.1"
 # http requests
 reqwest = "=0.9.17"
 regex = "1.2"
+futures = "0.1"
 
 [dependencies.serenity]
 version = "0.6"
