@@ -147,6 +147,13 @@ fn main() {
                     let ch = irc_msg.response_target().unwrap_or(&channel);
                     client.send_privmsg(&ch, ".quit").expect("Failed send_privmsg");
                 }
+                if message.starts_with(".roll") {
+                    use rand::Rng;
+                    let ch = irc_msg.response_target().unwrap_or(&channel);
+                    let seed: i32 = rand::thread_rng().gen_range(0, i32::max_value());
+                    let alpha_seed = convert_to_base26(seed);
+                    client.send_privmsg(&ch, format!("Your seed is: {}", alpha_seed)).expect("Failed send_privmesg");
+                }
                 if message.contains(client.current_nickname()) {
                     let ch = irc_msg.response_target().unwrap_or(&channel);
                     client.send_privmsg(&ch, "beep boop").expect("Failed send_privmsg");
