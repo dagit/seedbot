@@ -213,7 +213,7 @@ fn main() {
                         })
             })})
             .and_then(move|()| { lazy(move|| {
-                match rec.recv() {
+                match rec.recv_timeout(Duration::from_secs(2*RACEBOTWAIT)) {
                     Ok(Ok(chan)) => {
                         let when = Instant::now() + Duration::from_secs(1);
                         let send_client3 = send_client2.clone();
