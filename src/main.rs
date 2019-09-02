@@ -237,7 +237,13 @@ fn main() {
                         }))
                     },
                     _ => {
-                        future::Either::B(ok(()))
+                        future::Either::B(lazy(move|| {
+                            println!("Letting discord know we failed to get a channel in time");
+                            ctx.channel_id.say(&ctx.http, "Sorry, something went wrong. Check IRC, you might have a channel waiting.").map_err(|e| {
+                                IrcError::Custom{ inner: Error::from_boxed_compat(Box::new(e))}
+                            }).expect("Failed to respond on discord");
+                            ok(())
+                        }))
                     }
                 }
             })})
