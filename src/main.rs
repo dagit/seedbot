@@ -219,25 +219,25 @@ fn main() {
                         })
             })})
             .and_then(move|()| { lazy(move|| {
-                match rec.recv_timeout(Duration::from_secs(2*RACEBOTWAIT)) {
+                match rec.recv() /*rec.recv_timeout(Duration::from_secs(2*RACEBOTWAIT))*/ {
                     Ok(Ok(chan)) => {
-                        let when = Instant::now() + Duration::from_secs(1);
                         let send_client3 = send_client2.clone();
                         let chan2 = chan.clone();
                         future::Either::A(lazy(move|| {
+                            println!("responding on discord");
+                            ctx.channel_id.say(&ctx.http, format!("/join {}", chan)).map_err(|e| {
+                                IrcError::Custom{ inner: Error::from_boxed_compat(Box::new(e))}
+                            }).expect("Failed to respond on discord");
                             println!("joining {}", &chan);
                             ok(send_client2.send_join(&chan).expect("Failed to join race channel"))
                         }).and_then(move|_| {
+                            let when = Instant::now() + Duration::from_secs(1);
                             Delay::new(when)
                                 .map_err(|e| panic!("time failed; err={:?}", e))
                                 .and_then(move |_| { lazy(move|| {
                                     println!("setting goal");
                                     send_client3.send_privmsg(&chan2, ".setgoal mega man 2 randomizer - any% (easy)").expect("Failed to setgoal");
                                     send_client3.send_privmsg(&chan2, ".enter").expect("Failed to setgoal");
-                                    println!("responding on discord");
-                                    ctx.channel_id.say(&ctx.http, format!("/join {}", chan2)).map_err(|e| {
-                                        IrcError::Custom{ inner: Error::from_boxed_compat(Box::new(e))}
-                                    }).expect("Failed to respond on discord");
                                     ok(())
                                 })})
                         }))
