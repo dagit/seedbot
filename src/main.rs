@@ -19,6 +19,7 @@ use std::io::BufReader;
 use std::sync::Arc;
 use tokio::sync::mpsc::*;
 use regex::Regex;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Config {
@@ -63,15 +64,17 @@ impl EventHandler for Handler {
     }
 }
 
-//static RACEBOT: &str = "dagit";
-//static SRL: &str = "dagit";
-//const RACEBOTWAIT: i32 = 10;
-static RACEBOT: &str = "RaceBot";
-static SRL:     &str = "#speedrunslive";
-const RACEBOTWAIT: u64 = 3;
-// Race initiated for Mega Man Hacks. Join #srl-dr0nu to participate.
-//static ROOM: &str = r"Race initiated for Mega Man Hacks\. Join.? (?P<chan>\#srl\-[[:alnum:]]+) to participate\.";
-static ROOM: &str = r"Race initiated.*Mega Man Hacks.*Join.*(?P<chan>\#srl\-[[:alnum:]]+).*";
+/*
+static RACEBOT:     &str = "dagit";
+static SRL:         &str = "dagit";
+const  RACEBOTWAIT: u64  = 10;
+*/
+static RACEBOT:     &str = "RaceBot";
+static SRL:         &str = "#speedrunslive";
+const  RACEBOTWAIT: u64  = 3;
+// Ex. response from RaceBot: "Race initiated for Mega Man Hacks. Join #srl-dr0nu to participate."
+static ROOM: &str = r"Race initiated for Mega Man Hacks\. Join (?P<chan>\#srl\-[[:alnum:]]+) to participate\.";
+//static ROOM: &str = r"Race initiated.*Mega Man Hacks.*Join.*(?P<chan>\#srl\-[[:alnum:]]+).*";
 
 fn main() {
     let config_reader = BufReader::new(File::open("config.json").expect("Failed opening file"));
@@ -79,6 +82,10 @@ fn main() {
     let irccfg = config.clone();
 
     let (sender, receiver) = channel(10);
+    let (ctx_sender, ctx_receiver)
+        :(std::sync::mpsc::Sender<(ContextWrapper,Instant)>
+         ,std::sync::mpsc::Receiver<(ContextWrapper,Instant)>)
+        = std::sync::mpsc::channel();
 
     let discord = std::thread::spawn(move || {
         let mut client = Client::new(&config.token, Handler)
@@ -111,9 +118,6 @@ fn main() {
         println!("Connected to IRC as {}", client.current_nickname());
         let send_client = client.clone();
 
-        let (sender, rec) = std::sync::mpsc::channel();
-        let rec = std::sync::Arc::new(rec);
-        let tsender = sender.clone();
         let godot1 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)); // Not currently waiting on godot
         let godot2 = godot1.clone();
 
@@ -138,10 +142,28 @@ fn main() {
                             None => (),
                             Some(c) => {
                                 godot1.store(false, std::sync::atomic::Ordering::SeqCst);
-                                println!("chan is '{}'", c.as_str());
-                                match sender.send(Ok(c.as_str().to_owned())) {
-                                    Ok(()) => {},
-                                    Err(_) => {},
+                                match ctx_receiver.try_iter().last() {
+                                    Some((ctx,sent_at)) => {
+                                        if sent_at.elapsed() < Duration::from_secs(RACEBOTWAIT) {
+                                            let chan = c.as_str();
+                                            println!("chan is '{}'", chan);
+                                            println!("responding on discord");
+                                            ctx.channel_id.say(&ctx.http, format!("/join {}", &chan)).map_err(|e| {
+                                                IrcError::Custom{ inner: Error::from_boxed_compat(Box::new(e))}
+                                            }).expect("Failed to respond on discord");
+                                            println!("joining {}", &chan);
+                                            client.send_join(&chan).expect("Failed to join race channel");
+                                            println!("setting goal");
+                                            client.send_privmsg(&chan, ".setgoal mega man 2 randomizer - any% (easy)").expect("Failed to setgoal");
+                                            client.send_privmsg(&chan, ".enter").expect("Failed to setgoal");
+                                        } else { // this event took too long to arrive, it's probably
+                                                 // not for us.
+                                            println!("channel creation event arrived late");
+                                        }
+                                    },
+                                    _ => {
+                                        println!("Timeout failed");
+                                    }
                                 }
                             },
                         };
@@ -184,75 +206,31 @@ fn main() {
         });
         use irc::error::IrcError;
         use failure::Error;
-        use futures::future::{ok,lazy};
-        use tokio::timer::Delay;
+        use futures::future::{ok};
         use tokio::prelude::*;
-        use std::time::{Duration, Instant};
         reactor.register_future(receiver.map_err(|e| {
             IrcError::Custom{ inner: Error::from_boxed_compat(Box::new(e)) }
         }).for_each(move |(ctx,_msg)| {
-            let tsender = std::sync::Arc::new(tsender.clone());
             let godot2 = godot2.clone();
             let godot3 = godot2.clone();
             let send_client = send_client.clone();
-            let send_client2 = send_client.clone();
-            let rec = rec.clone();
-            lazy(move||{
-                println!("starting race");
-                ok(send_client.send_privmsg(SRL, ".startrace megamanhacks").expect("Failed to startrace"))
-            })
-            .and_then(move |()| { lazy(move ||{
-                println!("set godot2 true");
-                ok(godot2.store(true, std::sync::atomic::Ordering::SeqCst))
-            })})
-            .and_then(move |()| {lazy(move ||{
-                println!("now waiting for godot");
-                    struct TimeoutError;
-                    let when = Instant::now() + Duration::from_secs(RACEBOTWAIT);
-                    Delay::new(when)
-                        .map_err(|e| panic!("timer failed; err={:?}", e))
-                        .and_then(move |_|{
-                            tsender.send(Err(TimeoutError)).map_err(|_| ()).unwrap();
-                            godot3.store(false, std::sync::atomic::Ordering::SeqCst);
-                            println!("done waiting for godot: timeout");
-                            ok(())
-                        })
-            })})
-            .and_then(move|()| { lazy(move|| {
-                match rec.recv() /*rec.recv_timeout(Duration::from_secs(2*RACEBOTWAIT))*/ {
-                    Ok(Ok(chan)) => {
-                        let send_client3 = send_client2.clone();
-                        let chan2 = chan.clone();
-                        future::Either::A(lazy(move|| {
-                            println!("responding on discord");
-                            ctx.channel_id.say(&ctx.http, format!("/join {}", chan)).map_err(|e| {
-                                IrcError::Custom{ inner: Error::from_boxed_compat(Box::new(e))}
-                            }).expect("Failed to respond on discord");
-                            println!("joining {}", &chan);
-                            ok(send_client2.send_join(&chan).expect("Failed to join race channel"))
-                        }).and_then(move|_| {
-                            let when = Instant::now() + Duration::from_secs(1);
-                            Delay::new(when)
-                                .map_err(|e| panic!("time failed; err={:?}", e))
-                                .and_then(move |_| { lazy(move|| {
-                                    println!("setting goal");
-                                    send_client3.send_privmsg(&chan2, ".setgoal mega man 2 randomizer - any% (easy)").expect("Failed to setgoal");
-                                    send_client3.send_privmsg(&chan2, ".enter").expect("Failed to setgoal");
-                                    ok(())
-                                })})
-                        }))
-                    },
-                    _ => {
-                        future::Either::B(lazy(move|| {
-                            println!("Letting discord know we failed to get a channel in time");
-                            ctx.channel_id.say(&ctx.http, "Sorry, something went wrong. Check IRC, you might have a channel waiting.").map_err(|e| {
-                                IrcError::Custom{ inner: Error::from_boxed_compat(Box::new(e))}
-                            }).expect("Failed to respond on discord");
-                            ok(())
-                        }))
-                    }
+            let ctx2 = ctx.clone();
+            ctx_sender.send((ctx,Instant::now())).expect("Failed to send ctx");
+            println!("set godot2 true");
+            godot2.store(true, std::sync::atomic::Ordering::SeqCst);
+            println!("starting race");
+            send_client.send_privmsg(SRL, ".startrace megamanhacks").expect("Failed to startrace");
+            std::thread::spawn(move||{
+                std::thread::sleep(Duration::from_secs(RACEBOTWAIT));
+                if godot3.load(std::sync::atomic::Ordering::SeqCst) {
+                    godot3.store(false, std::sync::atomic::Ordering::SeqCst);
+                    println!("Letting discord know we failed to get a channel in time");
+                    ctx2.channel_id.say(&ctx2.http, "Sorry, something went wrong. Check IRC, you might have a channel waiting.").map_err(|e| {
+                        IrcError::Custom{ inner: Error::from_boxed_compat(Box::new(e))}
+                    }).expect("Failed to respond on discord");
                 }
-            })})
+            });
+            ok(())
         }));
         reactor.run().unwrap();
     });
