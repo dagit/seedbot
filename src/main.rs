@@ -127,7 +127,7 @@ fn main() {
                 // This substition will scrub all the control characters from the input
                 // https://modern.ircdocs.horse/formatting.html
                 // https://www.debuggex.com/r/5mzH8NGlLB6RyqaL
-                let scrub = r"\x03[0-9]{1,2}(,[0-9]{1,2})?|\x04[a-fA-F0-9]{6}|[\x02\x0f\x11\x16\x1d\x1e\x1f]";
+                let scrub = r"\x03([0-9]{1,2}(,[0-9]{1,2})?)?|\x04[a-fA-F0-9]{6}|[\x02\x0f\x11\x16\x1d\x1e\x1f]";
                 let scrub_re = Regex::new(scrub).expect("Failed to build scub");
                 let message = scrub_re.replace_all(&message, "");
                 println!("message = '{}'", message);
