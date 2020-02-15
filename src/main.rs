@@ -241,7 +241,18 @@ fn main() {
 #[command]
 fn ping(ctx: &mut Context, msg: &Message) -> CommandResult {
     if msg.author.bot { return Ok(()) } // Don't respond to bots
-    msg.reply(ctx, "Pong!")?;
+    let mut details = match msg.guild(&ctx.cache) {
+        None => "unknown guild".to_owned(),
+        Some(g) => {
+            format!("From guild with name '{}'", g.read().name)
+        },
+    };
+    details.push_str(format!("\nFrom user with display_name '{}'", msg.author.name).as_str());
+    if let Some(cname) = msg.channel_id.name(&ctx.cache)
+    {
+        details.push_str(format!("\nFrom channel '{}'", cname).as_str());
+    }
+    msg.reply(ctx, format!("Ping received. {}", details))?;
     Ok(())
 }
 
