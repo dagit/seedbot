@@ -252,7 +252,7 @@ fn ping(ctx: &mut Context, msg: &Message) -> CommandResult {
     {
         details.push_str(format!("\nFrom channel '{}'", cname).as_str());
     }
-    msg.reply(ctx, format!("Ping received. {}", details))?;
+    msg.reply(ctx, format!("Ping received.\n{}", details))?;
     Ok(())
 }
 
