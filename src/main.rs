@@ -91,14 +91,14 @@ static RACECONFIGS: &'static [RaceConfig] = &[
         guild:     "Mega Man 2 Randomizer",
         game_code: "megamanhacks",
         game_name: "Mega Man Hacks",
-        race_goal: "mega man 2 randomizer - any% (easy)'",
+        race_goal: "mega man 2 randomizer - any% (easy)",
     },
     // The mega man 2 randomizer tournament discord
     RaceConfig {
         guild:     "Mega Man 2 Randomizer Tournament",
         game_code: "megamanhacks",
         game_name: "Mega Man Hacks",
-        race_goal: "mega man 2 randomizer - any% (easy)'",
+        race_goal: "mega man 2 randomizer - any% (easy)",
     },
 ];
 
