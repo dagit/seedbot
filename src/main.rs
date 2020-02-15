@@ -52,7 +52,7 @@ group!({
 struct Chan;
 
 impl TypeMapKey for Chan {
-    type Value = Sender<(ContextWrapper,Message)>;
+    type Value = Sender<(ContextWrapper,Message,RaceConfig)>;
 }
 
 struct Handler;
@@ -73,8 +73,34 @@ static RACEBOT:     &str = "RaceBot";
 static SRL:         &str = "#speedrunslive";
 const  RACEBOTWAIT: u64  = 3;
 // Ex. response from RaceBot: "Race initiated for Mega Man Hacks. Join #srl-dr0nu to participate."
-static ROOM: &str = r"Race initiated for Mega Man Hacks\. Join (?P<chan>\#srl\-[[:alnum:]]+) to participate\.";
+//static ROOM: &str = r"Race initiated for Mega Man Hacks\. Join (?P<chan>\#srl\-[[:alnum:]]+) to participate\.";
+static ROOM: &str = r"Race initiated for (?P<game>[ [:alnum:]]+)\. Join (?P<chan>\#srl\-[[:alnum:]]+) to participate\.";
 //static ROOM: &str = r"Race initiated.*Mega Man Hacks.*Join.*(?P<chan>\#srl\-[[:alnum:]]+).*";
+
+#[derive(Debug,Copy,Clone)]
+struct RaceConfig {
+    pub guild:     &'static str,  // 'MM2 Randomizer'
+    pub game_code: &'static str,  // 'megamanhacks'
+    pub game_name: &'static str,  // 'Mega Man Hacks'
+    pub race_goal: &'static str,  // 'mega man 2 randomizer - any% (easy)'
+}
+
+static RACECONFIGS: &'static [RaceConfig] = &[
+    // The mega man 2 randomizer discord
+    RaceConfig {
+        guild:     "Mega Man 2 Randomizer",
+        game_code: "megamanhacks",
+        game_name: "Mega Man Hacks",
+        race_goal: "mega man 2 randomizer - any% (easy)'",
+    },
+    // The mega man 2 randomizer tournament discord
+    RaceConfig {
+        guild:     "Mega Man 2 Randomizer Tournament",
+        game_code: "megamanhacks",
+        game_name: "Mega Man Hacks",
+        race_goal: "mega man 2 randomizer - any% (easy)'",
+    },
+];
 
 fn main() {
     let config_reader = BufReader::new(File::open("config.json").expect("Failed opening file"));
@@ -83,8 +109,8 @@ fn main() {
 
     let (sender, receiver) = channel(10);
     let (ctx_sender, ctx_receiver)
-        :(std::sync::mpsc::Sender<(ContextWrapper,Instant)>
-         ,std::sync::mpsc::Receiver<(ContextWrapper,Instant)>)
+        :(std::sync::mpsc::Sender<(ContextWrapper,Instant,RaceConfig)>
+         ,std::sync::mpsc::Receiver<(ContextWrapper,Instant,RaceConfig)>)
         = std::sync::mpsc::channel();
 
     let discord = std::thread::spawn(move || {
@@ -138,24 +164,30 @@ fn main() {
                         println!("state: waiting on godot, message = '{}'", &message);
                         let chan = re.captures(&message)
                             .map(|c| c.name("chan"));
+                        let game = re.captures(&message)
+                            .map(|c| c.name("game"));
                         match chan.and_then(std::convert::identity) {
                             None => (),
                             Some(c) => {
                                 godot1.store(false, std::sync::atomic::Ordering::SeqCst);
                                 match ctx_receiver.try_iter().last() {
-                                    Some((ctx,sent_at)) => {
+                                    Some((ctx,sent_at,config)) => {
                                         if sent_at.elapsed() < Duration::from_secs(RACEBOTWAIT) {
                                             let chan = c.as_str();
+                                            let game = game.and_then(std::convert::identity).map(|g| g.as_str()).unwrap_or("unknown");
                                             println!("chan is '{}'", chan);
-                                            println!("responding on discord");
-                                            ctx.channel_id.say(&ctx.http, format!("/join {}", &chan)).map_err(|e| {
-                                                IrcError::Custom{ inner: Error::from_boxed_compat(Box::new(e))}
-                                            }).expect("Failed to respond on discord");
-                                            println!("joining {}", &chan);
-                                            client.send_join(&chan).expect("Failed to join race channel");
-                                            println!("setting goal");
-                                            client.send_privmsg(&chan, ".setgoal mega man 2 randomizer - any% (easy)").expect("Failed to setgoal");
-                                            client.send_privmsg(&chan, ".enter").expect("Failed to setgoal");
+                                            println!("game is '{}'", game);
+                                            if game == config.game_name {
+                                                println!("responding on discord");
+                                                ctx.channel_id.say(&ctx.http, format!("/join {}", &chan)).map_err(|e| {
+                                                    IrcError::Custom{ inner: Error::from_boxed_compat(Box::new(e))}
+                                                }).expect("Failed to respond on discord");
+                                                println!("joining {}", &chan);
+                                                client.send_join(&chan).expect("Failed to join race channel");
+                                                println!("setting goal");
+                                                client.send_privmsg(&chan, format!(".setgoal {}",config.race_goal)).expect("Failed to setgoal");
+                                                client.send_privmsg(&chan, ".enter").expect("Failed to enter");
+                                            }
                                         } else { // this event took too long to arrive, it's probably
                                                  // not for us.
                                             println!("channel creation event arrived late");
@@ -210,16 +242,16 @@ fn main() {
         use tokio::prelude::*;
         reactor.register_future(receiver.map_err(|e| {
             IrcError::Custom{ inner: Error::from_boxed_compat(Box::new(e)) }
-        }).for_each(move |(ctx,_msg)| {
+        }).for_each(move |(ctx,_msg,config)| {
             let godot2 = godot2.clone();
             let godot3 = godot2.clone();
             let send_client = send_client.clone();
             let ctx2 = ctx.clone();
-            ctx_sender.send((ctx,Instant::now())).expect("Failed to send ctx");
+            ctx_sender.send((ctx,Instant::now(),config)).expect("Failed to send ctx");
             println!("set godot2 true");
             godot2.store(true, std::sync::atomic::Ordering::SeqCst);
             println!("starting race");
-            send_client.send_privmsg(SRL, ".startrace megamanhacks").expect("Failed to startrace");
+            send_client.send_privmsg(SRL, format!(".startrace {}", config.game_code)).expect("Failed to startrace");
             std::thread::spawn(move||{
                 std::thread::sleep(Duration::from_secs(RACEBOTWAIT));
                 if godot3.load(std::sync::atomic::Ordering::SeqCst) {
@@ -276,8 +308,16 @@ fn startrace(ctx: &mut Context, msg: &Message) -> CommandResult {
         http: ctx.http.clone(),
         channel_id: msg.channel_id,
     };
-    msg.reply(&ctx, "Attempting to start race...")?;
-    (*chan).try_send((new_ctx,msg.clone()))?;
+    let guild = msg.guild(&ctx.cache).map(|g| g.read().name.to_owned());
+    if let Some(guild) = guild {
+        for rc in RACECONFIGS {
+            if rc.guild == guild {
+                msg.reply(&ctx, "Attempting to start race...")?;
+                (*chan).try_send((new_ctx,msg.clone(),*rc))?;
+                break;
+            }
+        }
+    }
     Ok(())
 }
 
