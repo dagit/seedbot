@@ -100,6 +100,13 @@ static RACECONFIGS: &'static [RaceConfig] = &[
         game_name: "Mega Man Hacks",
         race_goal: "mega man 2 randomizer - any% (easy)",
     },
+    // The mega man 9 tournament discord
+    RaceConfig {
+        guild:     "Mega Man 9 Tournament",
+        game_code: "mm9",
+        game_name: "Mega Man 9",
+        race_goal: "Mega Man 9 - any%",
+    },
 ];
 
 fn main() {
