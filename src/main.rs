@@ -105,7 +105,7 @@ static RACECONFIGS: &'static [RaceConfig] = &[
         guild:     "Mega Man 9 Tournament",
         game_code: "mm9",
         game_name: "Mega Man 9",
-        race_goal: "Mega Man 9 - any%",
+        race_goal: "any%",
     },
 ];
 
