@@ -236,11 +236,19 @@ fn main() {
                         println!("state: not waiting, message = '{}'", &message);
                         let chan = re.captures(&message)
                             .map(|c| c.name("chan"));
+                        let game = re.captures(&message)
+                            .map(|c| c.name("game"));
                         match chan.and_then(std::convert::identity) {
                             None => (),
                             Some(c) => {
-                                println!("joining {}", c.as_str());
-                                client.send_join(&c.as_str()).expect("Failed to join race channel");
+                                let game = game.and_then(std::convert::identity).map(|g| g.as_str()).unwrap_or("unknown");
+                                for rc in RACECONFIGS {
+                                    if rc.game_name == game {
+                                        println!("joining {}", c.as_str());
+                                        client.send_join(&c.as_str()).expect("Failed to join race channel");
+                                        break;
+                                    }
+                                }
                             },
                         };
                     }
@@ -469,5 +477,12 @@ fn convert_to_base26(seed: i32) -> String
 }
 
 fn parse_entrants(msg: &str) -> Vec<&str> {
-    msg.split(" | ").collect()
+    let mut entrants = vec![];
+    for e in msg.split(" | ").map(|e| e.split(" ").nth(0)) {
+        match e {
+            None => (),
+            Some(e) => entrants.push(e),
+        }
+    };
+    entrants
 }
