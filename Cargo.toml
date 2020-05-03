@@ -12,19 +12,23 @@ opt-level = 2
 debug = true
 
 [dependencies]
-irc = "0.13"
-serde = "1.0"
-serde_json = "1.0"
-rand = "0.7"
-tokio = "0.1"
-failure = "0.1"
+irc = { git = "https://github.com/aatxe/irc.git", branch = "stable" }
+serde = "*"
+serde_json = "*"
+rand = "*"
+failure = "*"
 # We need this older reqwest to work around a bug with blocking
 # http requests
-reqwest = "=0.9.17"
-regex = "1.3"
-futures = "0.1"
+reqwest = "*"
+#reqwest = "0.9"
+regex = "*"
+futures = "*"
+
+[dependencies.tokio]
+version = "*"
+features = ["stream", "sync"]
 
 [dependencies.serenity]
-version = "0.7"
+version = "*"
 default-features = false
-features = ["default_native_tls"]
+features = ["default_native_tls", "http", "standard_framework", "framework"]

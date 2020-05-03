@@ -2,6 +2,6 @@
 while :
 do
   when=`date -Iseconds`
-  cargo run --release | tee "rollchan-$when.log"
+  cargo run --release | ztee "rollchan-$when.log"
 done
 
