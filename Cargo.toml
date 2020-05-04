@@ -23,6 +23,7 @@ reqwest = { version = "0.10", features = ["json"] }
 #reqwest = "0.9"
 regex = "*"
 futures = "*"
+srl_http = { git = "https://github.com/dagit/srl-http.git" }
 
 [dependencies.tokio]
 version = "*"

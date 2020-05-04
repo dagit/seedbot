@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::*;
 use regex::Regex;
 use std::time::{Duration, Instant};
-use std::collections::{HashMap};
+use srl_http::{Entrants};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Config {
@@ -61,23 +61,6 @@ impl EventHandler for Handler {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Entrant {
-    displayname: String,
-    place: i32,
-    time: i32,
-    message: Option<String>,
-    statetext: String,
-    twitch: String,
-    trueskill: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Entrants {
-    count: String,
-    entrants: HashMap<String, Entrant>,
-}
-
 /*
 static RACEBOT:     &str = "dagit";
 static SRL:         &str = "dagit";
@@ -86,6 +69,7 @@ const  RACEBOTWAIT: u64  = 10;
 static RACEBOT:     &str = "RaceBot";
 static SRL:         &str = "#speedrunslive";
 const  RACEBOTWAIT: u64  = 3;
+static SRL_API:     &str = "http://api.speedrunslive.com:81/";
 // Ex. response from RaceBot: "Race initiated for Mega Man Hacks. Join #srl-dr0nu to participate."
 //static ROOM: &str = r"Race initiated for Mega Man Hacks\. Join (?P<chan>\#srl\-[[:alnum:]]+) to participate\.";
 static ROOM: &str = r"Race initiated for (?P<game>[ [:alnum:]]+)\. Join (?P<chan>\#srl\-[[:alnum:]]+) to participate\.";
@@ -286,11 +270,7 @@ fn main() {
                         if message.starts_with (".entrants") {
                             let split = message.split(" ").collect::<Vec<_>>();
                             if split.len() > 1 {
-                                let url = format!("http://api.speedrunslive.com:81/entrants/{}", split[1]);
-                                let entrants : Entrants = reqwest::get(&url)
-                                    .await.expect("failed to get url")
-                                    .json()
-                                    .await.expect("failed to decode json");
+                                let entrants : Entrants = srl_http::entrants(SRL_API, &split[1]).await.expect("Failed to get race entrants");
                                 println!("{:#?}", entrants);
                             }
                         }
@@ -314,11 +294,7 @@ fn main() {
                             let prefix = "#srl-";
                             if ch.starts_with(prefix) {
                                 let (_,raceid) = ch.split_at(prefix.len());
-                                let url = format!("http://api.speedrunslive.com:81/entrants/{}", raceid);
-                                let entrants : Entrants = reqwest::get(&url)
-                                    .await.expect("failed to get url")
-                                    .json()
-                                    .await.expect("failed to decode json");
+                                let entrants : Entrants = srl_http::entrants(SRL_API, raceid).await.expect("failed to get entrants");
                                 let twitches = entrants
                                     .entrants
                                     .iter()
