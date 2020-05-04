@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::*;
 use regex::Regex;
 use std::time::{Duration, Instant};
-use std::collections::{VecDeque,HashMap};
+use std::collections::{HashMap};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Config {
@@ -59,6 +59,23 @@ impl EventHandler for Handler {
     {
         println!("Connected to Discord as {}", bot.user.tag());
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Entrant {
+    displayname: String,
+    place: i32,
+    time: i32,
+    message: Option<String>,
+    statetext: String,
+    twitch: String,
+    trueskill: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Entrants {
+    count: String,
+    entrants: HashMap<String, Entrant>,
 }
 
 /*
@@ -112,15 +129,7 @@ static RACECONFIGS: &'static [RaceConfig] = &[
     },
 ];
 
-#[derive(Clone)]
-pub enum MultiState {
-    Idle,
-    AwaitingEntrantsResponse(String),
-    AwaitingURL(VecDeque<String> /* the unknown entrants */, String /* race channel */, Vec<String> /* channel names */), // Let's assume no more than 256 entrants in a race
-}
-
-#[tokio::main]
-async fn main() {
+fn main() {
     let config_reader = BufReader::new(File::open("config.json").expect("Failed opening file"));
     let config: Config = serde_json::from_reader(config_reader).expect("Failed decoding config");
     let irccfg = config.clone();
@@ -134,6 +143,8 @@ async fn main() {
         :(std::sync::mpsc::Sender<(ContextWrapper,String)>
          ,std::sync::mpsc::Receiver<(ContextWrapper,String)>)
          = std::sync::mpsc::channel();
+
+    let to_discord2 = to_discord.clone();
          
     let discord = std::thread::spawn(move || {
         let mut client = Client::new(&config.token, Handler)
@@ -174,11 +185,6 @@ async fn main() {
             let godot1 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)); // Not currently waiting on godot
             let godot2 = godot1.clone();
 
-            let mut multi_state : MultiState = MultiState::Idle;
-
-            // Maps IRC nick to twitch channel name
-            let mut stream_map : HashMap<String, Option<String>> = HashMap::new();
-
             let mut client = Client::from_config(config).await.expect("Failed to connect to SRL");
             client.identify().expect("Failed to identify with nickserv");
             println!("Connected to IRC as {}", client.current_nickname());
@@ -206,42 +212,54 @@ async fn main() {
                             if godot1.load(std::sync::atomic::Ordering::SeqCst) {
                                 let re = Regex::new(ROOM).expect("Failed to build regex");
                                 println!("state: waiting on godot, message = '{}'", &message);
-                                let chan = re.captures(&message)
-                                    .map(|c| c.name("chan"));
-                                let game = re.captures(&message)
-                                    .map(|c| c.name("game"));
-                                match chan.and_then(std::convert::identity) {
-                                    None => (),
-                                    Some(c) => {
-                                        godot1.store(false, std::sync::atomic::Ordering::SeqCst);
-                                        match ctx_receiver.try_iter().last() {
-                                            Some((ctx,sent_at,config)) => {
-                                                if sent_at.elapsed() < Duration::from_secs(RACEBOTWAIT) {
-                                                    let chan = c.as_str();
-                                                    let game = game.and_then(std::convert::identity).map(|g| g.as_str()).unwrap_or("unknown");
-                                                    println!("chan is '{}'", chan);
-                                                    println!("game is '{}'", game);
-                                                    if game == config.game_name {
-                                                        println!("responding on discord");
-                                                        to_discord.send((ctx, format!("/join {}", &chan))).expect("failed to send to irc_message thread");
-                                                        //ctx.channel_id.say(&ctx.http, format!("/join {}", &chan)).expect("Failed to respond on discord");
-                                                        println!("joining {}", &chan);
-                                                        client.send_join(&chan).expect("Failed to join race channel");
-                                                        println!("setting goal");
-                                                        client.send_privmsg(&chan, format!(".setgoal {}",config.race_goal)).expect("Failed to setgoal");
-                                                        client.send_privmsg(&chan, ".enter").expect("Failed to enter");
-                                                    }
-                                                } else { // this event took too long to arrive, it's probably
-                                                         // not for us.
-                                                    println!("channel creation event arrived late");
-                                                }
-                                            },
-                                            _ => {
-                                                println!("Timeout failed");
-                                            }
+
+                                if message == "You've already started a race. Please use .setgame in the race channel if you need to set it to the correct game."{
+                                    godot1.store(false, std::sync::atomic::Ordering::SeqCst);
+                                    match ctx_receiver.try_iter().last() {
+                                        Some((ctx,_,_)) => {
+                                            to_discord.send((ctx, message.to_string())).expect("Failed to send to discord");
+                                        },
+                                        _ => { println!("Timetout failed");
                                         }
-                                    },
-                                };
+                                    };
+                                } else {
+                                    let chan = re.captures(&message)
+                                        .map(|c| c.name("chan"));
+                                    let game = re.captures(&message)
+                                        .map(|c| c.name("game"));
+                                    match chan.and_then(std::convert::identity) {
+                                        None => (),
+                                        Some(c) => {
+                                            godot1.store(false, std::sync::atomic::Ordering::SeqCst);
+                                            match ctx_receiver.try_iter().last() {
+                                                Some((ctx,sent_at,config)) => {
+                                                    if sent_at.elapsed() < Duration::from_secs(RACEBOTWAIT) {
+                                                        let chan = c.as_str();
+                                                        let game = game.and_then(std::convert::identity).map(|g| g.as_str()).unwrap_or("unknown");
+                                                        println!("chan is '{}'", chan);
+                                                        println!("game is '{}'", game);
+                                                        if game == config.game_name {
+                                                            println!("responding on discord");
+                                                            to_discord.send((ctx, format!("/join {}", &chan))).expect("failed to send to irc_message thread");
+                                                            //ctx.channel_id.say(&ctx.http, format!("/join {}", &chan)).expect("Failed to respond on discord");
+                                                            println!("joining {}", &chan);
+                                                            client.send_join(&chan).expect("Failed to join race channel");
+                                                            println!("setting goal");
+                                                            client.send_privmsg(&chan, format!(".setgoal {}",config.race_goal)).expect("Failed to setgoal");
+                                                            client.send_privmsg(&chan, ".enter").expect("Failed to enter");
+                                                        }
+                                                    } else { // this event took too long to arrive, it's probably
+                                                             // not for us.
+                                                        println!("channel creation event arrived late");
+                                                    }
+                                                },
+                                                _ => {
+                                                    println!("Timeout failed");
+                                                }
+                                            }
+                                        },
+                                    };
+                                }
                             } else {
                                 // Join any mega man hacks race room and just chill
                                 let re = Regex::new(ROOM).expect("Failed to build regex");
@@ -265,6 +283,17 @@ async fn main() {
                                 };
                             }
                         }
+                        if message.starts_with (".entrants") {
+                            let split = message.split(" ").collect::<Vec<_>>();
+                            if split.len() > 1 {
+                                let url = format!("http://api.speedrunslive.com:81/entrants/{}", split[1]);
+                                let entrants : Entrants = reqwest::get(&url)
+                                    .await.expect("failed to get url")
+                                    .json()
+                                    .await.expect("failed to decode json");
+                                println!("{:#?}", entrants);
+                            }
+                        }
                         if message.starts_with(".botenter") || message.starts_with(".botjoin") {
                             let ch = irc_msg.response_target().unwrap_or(&channel);
                             client.send_privmsg(&ch, ".enter").expect("Failed send_privmsg");
@@ -280,108 +309,31 @@ async fn main() {
                             let alpha_seed = convert_to_base26(seed);
                             client.send_privmsg(&ch, format!("Your seed is: {}", alpha_seed)).expect("Failed send_privmesg");
                         }
-                        match multi_state.clone() {
-                            MultiState::Idle => {
-                                if message.starts_with(".multi") {
-                                    let ch = irc_msg.response_target().unwrap_or(&channel);
-                                    client.send_privmsg(&ch, ".entrants").expect("Failed send_privmsg");
-                                    println!("entering state: awaiting entrants response");
-                                    multi_state = MultiState::AwaitingEntrantsResponse(ch.to_owned());
-                                }
-                            },
-                            MultiState::AwaitingEntrantsResponse(race_channel) => {
-                                println!("awaiting entrants response");
-                                // :RaceBot!RaceBot@1523E686.9748F92.176EC33F.IP NOTICE rollchan :dagit | rollchan
-                                let source = irc_msg.source_nickname().unwrap_or("");
-                                if channel == irccfg.ircnick && source == RACEBOT {
-                                    let entrants = parse_entrants(&message);
-                                    let mut unmapped_entrants: VecDeque<String> = VecDeque::new();
-                                    let mut race_entrants:Vec<String> = vec![];
-                                    println!("parsed {} entrants", entrants.len());
-                                    for e in entrants {
-                                        match stream_map.get(e) {
-                                            Some(Some(s)) => race_entrants.push(s.to_owned()),
-                                            Some(None)    => (), // This means we've queried this user in the past
-                                                                 // and they had no stream.
-                                            None          => unmapped_entrants.push_back(e.to_owned()),
-                                        }
-                                    }
-                                    let num_to_query = unmapped_entrants.len() as u8;
-                                    multi_state = MultiState::AwaitingURL(unmapped_entrants.clone(), race_channel.to_owned(), race_entrants);
-                                    println!("entering state: awaiting url {}", num_to_query);
-                                    for entrant in &unmapped_entrants {
-                                        client.send_privmsg(&race_channel, format!(".stream {}", entrant)).expect("Failed send_privmsg");
-                                    }
+                        if message.starts_with(".multi") {
+                            let ch = irc_msg.response_target().unwrap_or(&channel);
+                            let prefix = "#srl-";
+                            if ch.starts_with(prefix) {
+                                let (_,raceid) = ch.split_at(prefix.len());
+                                let url = format!("http://api.speedrunslive.com:81/entrants/{}", raceid);
+                                let entrants : Entrants = reqwest::get(&url)
+                                    .await.expect("failed to get url")
+                                    .json()
+                                    .await.expect("failed to decode json");
+                                let twitches = entrants
+                                    .entrants
+                                    .iter()
+                                    .map(|(_,v)| v.twitch.to_owned())
+                                    .filter(|n| n.len() > 0)
+                                    .collect::<Vec<_>>();
+                                let mut url = "http://multitwitch.tv/".to_owned();
+                                url.push_str(&twitches.join("/"));
+                                if twitches.len() == 0 {
+                                    client.send_privmsg(&ch, "Sorry, no registered streams").expect("Failed to send_privmsg");
                                 } else {
-                                    // Something went wrong
-                                    println!("entering state: idle (something went wrong)");
-                                    multi_state = MultiState::Idle;
+                                    client.send_privmsg(&ch, format!("Multitwitch URL: {}", &url)).expect("Failed to send_privmsg");
                                 }
-                                
-                            },
-                            MultiState::AwaitingURL(mut unmapped_entrants, race_channel, mut race_entrants) => {
-                                println!("awaiting url {}", unmapped_entrants.len());
-                                //let ch = irc_msg.response_target().unwrap_or(&channel);
-                                let source = irc_msg.source_nickname().unwrap_or("");
-                                let http_schema = r"^https?://[.[:alnum:]]*twitch.tv/(?P<twitchchannel>.*)";
-                                let http_schema_re = Regex::new(http_schema).expect("Failed to build http_schema");
 
-                                println!("source = {}", source);
-                                if source == RACEBOT && http_schema_re.is_match(&message) {
-                                    println!("match a URL");
-                                    let ircnick = unmapped_entrants.pop_front();
-                                    let num = unmapped_entrants.len();
-                                    println!("entering state: awaiting url {}", num);
-                                    let twitchchannel = http_schema_re.captures(&message)
-                                        .map(|c| c.name("twitchchannel"))
-                                        .and_then(std::convert::identity)
-                                        .map(|g| g.as_str());
-                                    if let Some(twitchchannel) = twitchchannel {
-                                        println!("twitchannel = {}", twitchchannel);
-                                        if let Some(ircnick) = ircnick {
-                                            println!("ircnick = {}", ircnick);
-                                            println!("insert: {} => {}", ircnick, twitchchannel);
-                                            stream_map.insert(ircnick, Some(twitchchannel.to_string()));
-                                            race_entrants.push(twitchchannel.to_string());
-                                        }
-                                    } else {
-                                        println!("unable to parse twitch channel: {}", message);
-                                    }
-                                    multi_state = MultiState::AwaitingURL(unmapped_entrants, race_channel.to_owned(), race_entrants);
-                                } else if source == RACEBOT && message == "Doesn't exist." {
-                                    println!("no stream set");
-                                    let ircnick = unmapped_entrants.pop_front();
-                                    multi_state = MultiState::AwaitingURL(unmapped_entrants, race_channel.to_owned(), race_entrants);
-                                    if let Some(ircnick) = ircnick {
-                                        println!("ircnick = {}, caching no channel", ircnick);
-                                        stream_map.insert(ircnick, None);
-                                    }
-                                } else { // this is a failsafe case for when a URL is registered but doesn't parse
-                                    println!("failed to match a URL");
-                                    let ircnick = unmapped_entrants.pop_front();
-                                    multi_state = MultiState::AwaitingURL(unmapped_entrants, race_channel.to_owned(), race_entrants);
-                                    if let Some(ircnick) = ircnick {
-                                        println!("ircnick = {}, caching no channel", ircnick);
-                                        stream_map.insert(ircnick, None);
-                                    }
-                                }
-                                if let MultiState::AwaitingURL(ref unmapped, _, ref entrants) = multi_state.clone() {
-                                    if unmapped.len() == 0 {
-                                        println!("entering state: idle (done)");
-                                        multi_state = MultiState::Idle;
-                                        let mut url = "http://multitwitch.tv/".to_owned();
-                                        url.push_str(&entrants.join("/"));
-                                        if entrants.len() == 0 {
-                                            client.send_privmsg(&race_channel, "Sorry, no registered streams").expect("Failed to send_privmsg");
-                                        } else {
-                                            client.send_privmsg(&race_channel, format!("Multitwitch URL: {}", &url)).expect("Failed to send_privmsg");
-                                        }
-                                    }
-                                }
-                            },
-                        }
-                        if message.starts_with(".deletecache") {
-                            stream_map.clear();
+                            }
                         }
                         if message.contains(client.current_nickname()) {
                             let ch = irc_msg.response_target().unwrap_or(&channel);
@@ -407,7 +359,7 @@ async fn main() {
                             if godot3.load(std::sync::atomic::Ordering::SeqCst) {
                                 godot3.store(false, std::sync::atomic::Ordering::SeqCst);
                                 println!("Letting discord know we failed to get a channel in time");
-                                ctx2.channel_id.say(&ctx2.http, "Sorry, something went wrong. Check IRC, you might have a channel waiting.")
+                                to_discord2.send((ctx2, "Sorry, something went wrong. Check IRC, you might have a channel waiting.".to_string()))
                                     .expect("Failed to respond on discord");
                             }
                         }
@@ -497,15 +449,4 @@ fn convert_to_base26(seed: i32) -> String
         i /= base;
     }
     output.chars().rev().collect()
-}
-
-fn parse_entrants(msg: &str) -> Vec<&str> {
-    let mut entrants = vec![];
-    for e in msg.split(" | ").map(|e| e.split(" ").nth(0)) {
-        match e {
-            None => (),
-            Some(e) => entrants.push(e),
-        }
-    };
-    entrants
 }

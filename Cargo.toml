@@ -19,7 +19,7 @@ rand = "*"
 failure = "*"
 # We need this older reqwest to work around a bug with blocking
 # http requests
-reqwest = "*"
+reqwest = { version = "0.10", features = ["json"] }
 #reqwest = "0.9"
 regex = "*"
 futures = "*"
