@@ -15,11 +15,12 @@ use serenity::http::client::Http;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::Arc;
-use tokio::sync::mpsc::*;
+use std::sync::{Arc,Mutex};
+use std::sync::mpsc::{Sender};
 use regex::Regex;
 use std::time::{Duration, Instant};
 use srl_http::{Entrants};
+use std::collections::VecDeque;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Config {
@@ -49,7 +50,7 @@ struct General;
 struct Chan;
 
 impl TypeMapKey for Chan {
-    type Value = tokio::sync::mpsc::Sender<(ContextWrapper,Message,RaceConfig)>;
+    type Value = Mutex<Sender<(ContextWrapper,Message,RaceConfig)>>;
 }
 
 struct Handler;
@@ -118,11 +119,7 @@ fn main() {
     let config: Config = serde_json::from_reader(config_reader).expect("Failed decoding config");
     let irccfg = config.clone();
 
-    let (sender, mut receiver) = channel(10);
-    let (ctx_sender, ctx_receiver)
-        :(std::sync::mpsc::Sender<(ContextWrapper,Instant,RaceConfig)>
-         ,std::sync::mpsc::Receiver<(ContextWrapper,Instant,RaceConfig)>)
-        = std::sync::mpsc::channel();
+    let (sender, receiver) = std::sync::mpsc::channel();
     let (to_discord, for_discord)
         :(std::sync::mpsc::Sender<(ContextWrapper,String)>
          ,std::sync::mpsc::Receiver<(ContextWrapper,String)>)
@@ -135,7 +132,7 @@ fn main() {
             .expect("Error creating client");
         {
             let mut data = client.data.write();
-            data.insert::<Chan>(sender);
+            data.insert::<Chan>(Mutex::new(sender));
         }
         client.with_framework(StandardFramework::new()
             .configure(|c| c.prefix(&config.prefix))
@@ -156,7 +153,6 @@ fn main() {
     });
     let irc = std::thread::spawn(move || {
         let thread = async move {
-            use futures::select;
             use futures::prelude::*;
             use irc::client::prelude::*;
             let config = Config {
@@ -166,17 +162,25 @@ fn main() {
                 channels: vec!["#speedrunslive".to_owned()],
                 ..irc::client::prelude::Config::default()
             };
-            let godot1 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)); // Not currently waiting on godot
-            let godot2 = godot1.clone();
-
             let mut client = Client::from_config(config).await.expect("Failed to connect to SRL");
             client.identify().expect("Failed to identify with nickserv");
             println!("Connected to IRC as {}", client.current_nickname());
             let send_client = client.sender();
+            let mut pending_races : VecDeque<RacebotStartRaceState> = VecDeque::new();
             let reactor1 = async move {
 
                 let mut irc_stream = client.stream().expect("failed to make irc stream");
                 loop {
+                    // First we check if discord has any work for us to do
+                    match receiver.try_recv() {
+                        Err(_) => { /* TODO: should we exit or what? */}
+                        Ok((ctx, _msg, config)) => {
+                            println!("starting race");
+                            pending_races.push_back(RacebotStartRaceState::Waiting(ctx.clone(), Instant::now(), config));
+                            send_client.send(Command::PRIVMSG(SRL.to_string(), format!(".startrace {}", config.game_code))).expect("Failed to startrace");
+                        }
+                    }
+                    // Next we go through the IRC messages
                     let irc_msg = irc_stream.select_next_some().await.expect("failed to get next message");
                     let m = match irc_msg.clone().command {
                         Command::PRIVMSG(channel, message) => Some((channel, message)),
@@ -192,80 +196,63 @@ fn main() {
                         let message = scrub_re.replace_all(&message, "");
                         println!("channel = {}, message = '{}'", channel, message);
                         // Check to see if we should note down the channel
-                        if irc_msg.source_nickname() == Some(&RACEBOT) {
-                            if godot1.load(std::sync::atomic::Ordering::SeqCst) {
-                                let re = Regex::new(ROOM).expect("Failed to build regex");
-                                println!("state: waiting on godot, message = '{}'", &message);
-
-                                if message == "You've already started a race. Please use .setgame in the race channel if you need to set it to the correct game."{
-                                    godot1.store(false, std::sync::atomic::Ordering::SeqCst);
-                                    match ctx_receiver.try_iter().last() {
-                                        Some((ctx,_,_)) => {
-                                            to_discord.send((ctx, message.to_string())).expect("Failed to send to discord");
-                                        },
-                                        _ => { println!("Timetout failed");
-                                        }
-                                    };
-                                } else {
-                                    let chan = re.captures(&message)
-                                        .map(|c| c.name("chan"));
-                                    let game = re.captures(&message)
-                                        .map(|c| c.name("game"));
-                                    match chan.and_then(std::convert::identity) {
-                                        None => (),
-                                        Some(c) => {
-                                            godot1.store(false, std::sync::atomic::Ordering::SeqCst);
-                                            match ctx_receiver.try_iter().last() {
-                                                Some((ctx,sent_at,config)) => {
-                                                    if sent_at.elapsed() < Duration::from_secs(RACEBOTWAIT) {
-                                                        let chan = c.as_str();
-                                                        let game = game.and_then(std::convert::identity).map(|g| g.as_str()).unwrap_or("unknown");
-                                                        println!("chan is '{}'", chan);
-                                                        println!("game is '{}'", game);
-                                                        if game == config.game_name {
-                                                            println!("responding on discord");
-                                                            to_discord.send((ctx, format!("/join {}", &chan))).expect("failed to send to irc_message thread");
-                                                            //ctx.channel_id.say(&ctx.http, format!("/join {}", &chan)).expect("Failed to respond on discord");
-                                                            println!("joining {}", &chan);
-                                                            client.send_join(&chan).expect("Failed to join race channel");
-                                                            println!("setting goal");
-                                                            client.send_privmsg(&chan, format!(".setgoal {}",config.race_goal)).expect("Failed to setgoal");
-                                                            client.send_privmsg(&chan, ".enter").expect("Failed to enter");
-                                                        }
-                                                    } else { // this event took too long to arrive, it's probably
-                                                             // not for us.
-                                                        println!("channel creation event arrived late");
-                                                    }
-                                                },
-                                                _ => {
-                                                    println!("Timeout failed");
-                                                }
-                                            }
-                                        },
-                                    };
+                        let mut new_pending_races = VecDeque::new();
+                        for r in pending_races {
+                            use RacebotStartRaceState::*;
+                            let ctx = r.get_context();
+                            let config = r.get_config();
+                            let new_r = racebot_response(&irc_msg, &message, r);
+                            match new_r {
+                                Waiting(_, _, _) => new_pending_races.push_back(new_r),
+                                Success(chan) => {
+                                    if let Some(ctx) = ctx {
+                                        to_discord.send((ctx, format!("/join {}", &chan))).expect("failed to send to irc_message thread");
+                                    }
+                                    println!("joining {}", &chan);
+                                    client.send_join(&chan).expect("Failed to join race channel");
+                                    println!("setting goal");
+                                    if let Some(config) = config {
+                                        client.send_privmsg(&chan, format!(".setgoal {}",config.race_goal)).expect("Failed to setgoal");
+                                    }
+                                    client.send_privmsg(&chan, ".enter").expect("Failed to enter");
                                 }
-                            } else {
-                                // Join any mega man hacks race room and just chill
-                                let re = Regex::new(ROOM).expect("Failed to build regex");
-                                println!("state: not waiting, message = '{}'", &message);
-                                let chan = re.captures(&message)
-                                    .map(|c| c.name("chan"));
-                                let game = re.captures(&message)
-                                    .map(|c| c.name("game"));
-                                match chan.and_then(std::convert::identity) {
-                                    None => (),
-                                    Some(c) => {
-                                        let game = game.and_then(std::convert::identity).map(|g| g.as_str()).unwrap_or("unknown");
-                                        for rc in RACECONFIGS {
-                                            if rc.game_name == game {
-                                                println!("joining {}", c.as_str());
-                                                client.send_join(&c.as_str()).expect("Failed to join race channel");
-                                                continue;
-                                            }
-                                        }
-                                    },
-                                };
+                                Failed(ctx, _, _, message) => {
+                                    to_discord.send((ctx, message.to_string())).expect("Failed to send to discord");
+                                }
+                                Timedout => {
+                                    println!("Letting discord know we failed to get a channel in time");
+                                    if let Some(ctx) = ctx {
+                                        to_discord2.send((ctx, "Sorry, something went wrong. Check IRC, you might have a channel waiting.".to_string()))
+                                            .expect("Failed to respond on discord");
+                                    }
+                                }
+                                Bad => {
+                                    println!("racebot waiting entered illegal state");
+                                }
                             }
+                        }
+                        pending_races = new_pending_races;
+                        if irc_msg.source_nickname() == Some(&RACEBOT) {
+                            // Join any mega man hacks race room and just chill
+                            let re = Regex::new(ROOM).expect("Failed to build regex");
+                            println!("state: not waiting, message = '{}'", &message);
+                            let chan = re.captures(&message)
+                                .map(|c| c.name("chan"));
+                            let game = re.captures(&message)
+                                .map(|c| c.name("game"));
+                            match chan.and_then(std::convert::identity) {
+                                None => (),
+                                Some(c) => {
+                                    let game = game.and_then(std::convert::identity).map(|g| g.as_str()).unwrap_or("unknown");
+                                    for rc in RACECONFIGS {
+                                        if rc.game_name == game {
+                                            println!("joining {}", c.as_str());
+                                            client.send_join(&c.as_str()).expect("Failed to join race channel");
+                                            continue;
+                                        }
+                                    }
+                                },
+                            };
                         }
                         if message.starts_with (".entrants") {
                             let split = message.split(" ").collect::<Vec<_>>();
@@ -318,38 +305,7 @@ fn main() {
                     }
                 }
             };
-            let reactor2 = async move {
-                loop {
-                    match receiver.recv().await {
-                        None => { /* TODO: should we exit or what? */}
-                        Some((ctx, _msg, config)) => {
-                            let godot2 = godot2.clone();
-                            let godot3 = godot2.clone();
-                            let ctx2 = ctx.clone();
-                            ctx_sender.send((ctx,Instant::now(),config)).expect("Failed to send ctx");
-                            println!("set godot2 true");
-                            godot2.store(true, std::sync::atomic::Ordering::SeqCst);
-                            println!("starting race");
-                            send_client.send(Command::PRIVMSG(SRL.to_string(), format!(".startrace {}", config.game_code))).expect("Failed to startrace");
-                            tokio::time::delay_for(Duration::from_secs(RACEBOTWAIT)).await;
-                            if godot3.load(std::sync::atomic::Ordering::SeqCst) {
-                                godot3.store(false, std::sync::atomic::Ordering::SeqCst);
-                                println!("Letting discord know we failed to get a channel in time");
-                                to_discord2.send((ctx2, "Sorry, something went wrong. Check IRC, you might have a channel waiting.".to_string()))
-                                    .expect("Failed to respond on discord");
-                            }
-                        }
-                    }
-                }
-            };
-            use futures::pin_mut;
-            let r1 = reactor1.fuse();
-            let r2 = reactor2.fuse();
-            pin_mut!(r1, r2);
-            select!{
-                () = r1 => {},
-                () = r2 => {}
-            };
+            futures::join!(reactor1);
         };
         let mut rt = tokio::runtime::Builder::new()
             .basic_scheduler()
@@ -406,7 +362,7 @@ fn startrace(ctx: &mut Context, msg: &Message) -> CommandResult {
         for rc in RACECONFIGS {
             if rc.guild == guild {
                 msg.reply(&ctx, "Attempting to start race...")?;
-                (*chan).try_send((new_ctx,msg.clone(),*rc))?;
+                (*chan).lock().unwrap().send((new_ctx,msg.clone(),*rc))?;
                 break;
             }
         }
@@ -425,4 +381,68 @@ fn convert_to_base26(seed: i32) -> String
         i /= base;
     }
     output.chars().rev().collect()
+}
+
+#[derive(Clone, Debug)]
+enum RacebotStartRaceState {
+    Waiting(ContextWrapper,Instant,RaceConfig),
+    Timedout,
+    Failed(ContextWrapper,Instant,RaceConfig,String),  // error message from racebot
+    Bad,
+    Success(String), // channel
+}
+
+impl RacebotStartRaceState {
+    fn failed(self, msg: &str) -> RacebotStartRaceState {
+        match self {
+            RacebotStartRaceState::Waiting(ctx, when, config) => RacebotStartRaceState::Failed(ctx, when, config, msg.to_owned()),
+            _ => RacebotStartRaceState::Bad
+        }
+    }
+    fn get_context(&self) -> Option<ContextWrapper> {
+        match self {
+            RacebotStartRaceState::Waiting(ctx, _, _) => Some(ctx.clone()),
+            RacebotStartRaceState::Failed(ctx, _, _, _) => Some(ctx.clone()),
+            _ => None
+        }
+    }
+    fn get_config(&self) -> Option<RaceConfig> {
+        match self {
+            RacebotStartRaceState::Waiting(_, _, config) => Some(config.clone()),
+            RacebotStartRaceState::Failed(_, _, config, _) => Some(config.clone()),
+            _ => None
+        }
+    }
+}
+
+fn racebot_response(irc_msg: &irc::client::prelude::Message, message: &str, state: RacebotStartRaceState) -> RacebotStartRaceState {
+    if irc_msg.source_nickname() != Some(&RACEBOT) { return state; }
+    if message == "You've already started a race. Please use .setgame in the race channel if you need to set it to the correct game."{
+        return state.failed(&message);
+    }
+    let re = Regex::new(ROOM).expect("Failed to build regex");
+    let chan = re.captures(&message).map(|c| c.name("chan"));
+    let game = re.captures(&message).map(|c| c.name("game"));
+    let c = chan.and_then(std::convert::identity).unwrap();
+
+    match state {
+        RacebotStartRaceState::Waiting(_, sent_at, config) => {
+            if sent_at.elapsed() >= Duration::from_secs(RACEBOTWAIT) {
+                println!("channel creation event arrived late");
+                return RacebotStartRaceState::Timedout;
+            }
+            let chan = c.as_str();
+            let game = game.and_then(std::convert::identity).map(|g| g.as_str()).unwrap_or("unknown");
+            println!("chan is '{}'", chan);
+            println!("game is '{}'", game);
+            if game == config.game_name {
+                return RacebotStartRaceState::Success(chan.to_string());
+            } else {
+                // ignore the message from racebot, it must have been
+                // for someone else
+                return state;
+            }
+        },
+        _ => return RacebotStartRaceState::Bad,
+    }
 }
