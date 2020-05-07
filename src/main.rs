@@ -125,8 +125,6 @@ fn main() {
          ,std::sync::mpsc::Receiver<(ContextWrapper,String)>)
          = std::sync::mpsc::channel();
 
-    let to_discord2 = to_discord.clone();
-         
     let discord = std::thread::spawn(move || {
         let mut client = Client::new(&config.token, Handler)
             .expect("Error creating client");
@@ -165,147 +163,112 @@ fn main() {
             let mut client = Client::from_config(config).await.expect("Failed to connect to SRL");
             client.identify().expect("Failed to identify with nickserv");
             println!("Connected to IRC as {}", client.current_nickname());
-            let send_client = client.sender();
-            let mut pending_races : VecDeque<RacebotStartRaceState> = VecDeque::new();
-            let reactor1 = async move {
+            // This substition will scrub all the control characters from the input
+            // https://modern.ircdocs.horse/formatting.html
+            // https://www.debuggex.com/r/5mzH8NGlLB6RyqaL
+            let scrub = r"\x03([0-9]{1,2}(,[0-9]{1,2})?)?|\x04[a-fA-F0-9]{6}|[\x02\x0f\x11\x16\x1d\x1e\x1f]";
+            let scrub_re = Regex::new(scrub).expect("Failed to build scrub");
+            let mut start_race = StartRace::new(receiver, client.sender(), to_discord);
 
-                let mut irc_stream = client.stream().expect("failed to make irc stream");
-                loop {
-                    // First we check if discord has any work for us to do
-                    match receiver.try_recv() {
-                        Err(_) => { /* TODO: should we exit or what? */}
-                        Ok((ctx, _msg, config)) => {
-                            println!("starting race");
-                            pending_races.push_back(RacebotStartRaceState::Waiting(ctx.clone(), Instant::now(), config));
-                            send_client.send(Command::PRIVMSG(SRL.to_string(), format!(".startrace {}", config.game_code))).expect("Failed to startrace");
+            let mut irc_stream = client.stream().expect("failed to make irc stream");
+            loop {
+                // First we check if discord has any work for us to do
+                start_race.poll_discord();
+                // Next we go through the IRC messages, and to do that
+                // we do some normalization and cleanup just to make messages
+                // easier to deal with.
+                let irc_msg = irc_stream.select_next_some().await.expect("failed to get next message");
+                let m = match irc_msg.clone().command {
+                    Command::PRIVMSG(channel, message) => Some((channel, message)),
+                    Command::NOTICE(channel, message) => Some((channel, message)),
+                    _ => None,
+                };
+                if let Some((channel, message)) = m {
+                    // Clean out color codes and what have you.
+                    let message = scrub_re.replace_all(&message, "");
+
+                    // At this point, we have a nicely normalized message to deal with
+                    println!("channel = {}, message = '{}'", channel, message);
+
+                    // Check to see if racebot has responded about any of our pending races
+                    start_race.update_pending_races(&irc_msg, &message);
+
+                    // Check if we should observe a newly created room
+                    if irc_msg.source_nickname() == Some(RACEBOT) {
+                        // Join any mega man hacks race room and just chill
+                        let re = Regex::new(ROOM).expect("Failed to build regex");
+                        println!("state: not waiting, message = '{}'", &message);
+                        let chan = re.captures(&message)
+                            .map(|c| c.name("chan"));
+                        let game = re.captures(&message)
+                            .map(|c| c.name("game"));
+                        match chan.and_then(std::convert::identity) {
+                            None => (),
+                            Some(c) => {
+                                let game = game.and_then(std::convert::identity).map(|g| g.as_str()).unwrap_or("unknown");
+                                for rc in RACECONFIGS {
+                                    if rc.game_name == game {
+                                        println!("joining {}", c.as_str());
+                                        client.send_join(&c.as_str()).expect("Failed to join race channel");
+                                        continue;
+                                    }
+                                }
+                            },
+                        };
+                    }
+
+                    // The rest of this loop is just processing individual commands from IRC
+                    if message.starts_with (".entrants") {
+                        let split = message.split(" ").collect::<Vec<_>>();
+                        if split.len() > 1 {
+                            let entrants : Entrants = srl_http::entrants(SRL_API, &split[1]).await.expect("Failed to get race entrants");
+                            println!("{:#?}", entrants);
                         }
                     }
-                    // Next we go through the IRC messages
-                    let irc_msg = irc_stream.select_next_some().await.expect("failed to get next message");
-                    let m = match irc_msg.clone().command {
-                        Command::PRIVMSG(channel, message) => Some((channel, message)),
-                        Command::NOTICE(channel, message) => Some((channel, message)),
-                        _ => None,
-                    };
-                    if let Some((channel, message)) = m {
-                        // This substition will scrub all the control characters from the input
-                        // https://modern.ircdocs.horse/formatting.html
-                        // https://www.debuggex.com/r/5mzH8NGlLB6RyqaL
-                        let scrub = r"\x03([0-9]{1,2}(,[0-9]{1,2})?)?|\x04[a-fA-F0-9]{6}|[\x02\x0f\x11\x16\x1d\x1e\x1f]";
-                        let scrub_re = Regex::new(scrub).expect("Failed to build scrub");
-                        let message = scrub_re.replace_all(&message, "");
-                        println!("channel = {}, message = '{}'", channel, message);
-                        // Check to see if we should note down the channel
-                        let mut new_pending_races = VecDeque::new();
-                        for r in pending_races {
-                            use RacebotStartRaceState::*;
-                            let ctx = r.get_context();
-                            let config = r.get_config();
-                            let new_r = racebot_response(&irc_msg, &message, r);
-                            match new_r {
-                                Waiting(_, _, _) => new_pending_races.push_back(new_r),
-                                Success(chan) => {
-                                    if let Some(ctx) = ctx {
-                                        to_discord.send((ctx, format!("/join {}", &chan))).expect("failed to send to irc_message thread");
-                                    }
-                                    println!("joining {}", &chan);
-                                    client.send_join(&chan).expect("Failed to join race channel");
-                                    println!("setting goal");
-                                    if let Some(config) = config {
-                                        client.send_privmsg(&chan, format!(".setgoal {}",config.race_goal)).expect("Failed to setgoal");
-                                    }
-                                    client.send_privmsg(&chan, ".enter").expect("Failed to enter");
-                                }
-                                Failed(ctx, _, _, message) => {
-                                    to_discord.send((ctx, message.to_string())).expect("Failed to send to discord");
-                                }
-                                Timedout => {
-                                    println!("Letting discord know we failed to get a channel in time");
-                                    if let Some(ctx) = ctx {
-                                        to_discord2.send((ctx, "Sorry, something went wrong. Check IRC, you might have a channel waiting.".to_string()))
-                                            .expect("Failed to respond on discord");
-                                    }
-                                }
-                                Bad => {
-                                    println!("racebot waiting entered illegal state");
-                                }
+                    if message.starts_with(".botenter") || message.starts_with(".botjoin") {
+                        let ch = irc_msg.response_target().unwrap_or(&channel);
+                        client.send_privmsg(&ch, ".enter").expect("Failed send_privmsg");
+                    }
+                    if message.starts_with(".botquit") || message.starts_with(".botforfeit") {
+                        let ch = irc_msg.response_target().unwrap_or(&channel);
+                        client.send_privmsg(&ch, ".quit").expect("Failed send_privmsg");
+                    }
+                    if message.starts_with(".roll") {
+                        use rand::Rng;
+                        let ch = irc_msg.response_target().unwrap_or(&channel);
+                        let seed: i32 = rand::thread_rng().gen_range(0, i32::max_value());
+                        let alpha_seed = convert_to_base26(seed);
+                        client.send_privmsg(&ch, format!("Your seed is: {}", alpha_seed)).expect("Failed send_privmesg");
+                    }
+                    if message.starts_with(".multi") {
+                        let ch = irc_msg.response_target().unwrap_or(&channel);
+                        let prefix = "#srl-";
+                        if ch.starts_with(prefix) {
+                            let (_,raceid) = ch.split_at(prefix.len());
+                            let entrants : Entrants = srl_http::entrants(SRL_API, raceid).await.expect("failed to get entrants");
+                            let twitches = entrants
+                                .entrants
+                                .iter()
+                                .map(|(_,v)| v.twitch.to_owned())
+                                .filter(|n| n.len() > 0)
+                                .collect::<Vec<_>>();
+                            let mut url = "http://multitwitch.tv/".to_owned();
+                            url.push_str(&twitches.join("/"));
+                            if twitches.len() == 0 {
+                                client.send_privmsg(&ch, "Sorry, no registered streams").expect("Failed to send_privmsg");
+                            } else {
+                                client.send_privmsg(&ch, format!("Multitwitch URL: {}", &url)).expect("Failed to send_privmsg");
                             }
-                        }
-                        pending_races = new_pending_races;
-                        if irc_msg.source_nickname() == Some(&RACEBOT) {
-                            // Join any mega man hacks race room and just chill
-                            let re = Regex::new(ROOM).expect("Failed to build regex");
-                            println!("state: not waiting, message = '{}'", &message);
-                            let chan = re.captures(&message)
-                                .map(|c| c.name("chan"));
-                            let game = re.captures(&message)
-                                .map(|c| c.name("game"));
-                            match chan.and_then(std::convert::identity) {
-                                None => (),
-                                Some(c) => {
-                                    let game = game.and_then(std::convert::identity).map(|g| g.as_str()).unwrap_or("unknown");
-                                    for rc in RACECONFIGS {
-                                        if rc.game_name == game {
-                                            println!("joining {}", c.as_str());
-                                            client.send_join(&c.as_str()).expect("Failed to join race channel");
-                                            continue;
-                                        }
-                                    }
-                                },
-                            };
-                        }
-                        if message.starts_with (".entrants") {
-                            let split = message.split(" ").collect::<Vec<_>>();
-                            if split.len() > 1 {
-                                let entrants : Entrants = srl_http::entrants(SRL_API, &split[1]).await.expect("Failed to get race entrants");
-                                println!("{:#?}", entrants);
-                            }
-                        }
-                        if message.starts_with(".botenter") || message.starts_with(".botjoin") {
-                            let ch = irc_msg.response_target().unwrap_or(&channel);
-                            client.send_privmsg(&ch, ".enter").expect("Failed send_privmsg");
-                        }
-                        if message.starts_with(".botquit") || message.starts_with(".botforfeit") {
-                            let ch = irc_msg.response_target().unwrap_or(&channel);
-                            client.send_privmsg(&ch, ".quit").expect("Failed send_privmsg");
-                        }
-                        if message.starts_with(".roll") {
-                            use rand::Rng;
-                            let ch = irc_msg.response_target().unwrap_or(&channel);
-                            let seed: i32 = rand::thread_rng().gen_range(0, i32::max_value());
-                            let alpha_seed = convert_to_base26(seed);
-                            client.send_privmsg(&ch, format!("Your seed is: {}", alpha_seed)).expect("Failed send_privmesg");
-                        }
-                        if message.starts_with(".multi") {
-                            let ch = irc_msg.response_target().unwrap_or(&channel);
-                            let prefix = "#srl-";
-                            if ch.starts_with(prefix) {
-                                let (_,raceid) = ch.split_at(prefix.len());
-                                let entrants : Entrants = srl_http::entrants(SRL_API, raceid).await.expect("failed to get entrants");
-                                let twitches = entrants
-                                    .entrants
-                                    .iter()
-                                    .map(|(_,v)| v.twitch.to_owned())
-                                    .filter(|n| n.len() > 0)
-                                    .collect::<Vec<_>>();
-                                let mut url = "http://multitwitch.tv/".to_owned();
-                                url.push_str(&twitches.join("/"));
-                                if twitches.len() == 0 {
-                                    client.send_privmsg(&ch, "Sorry, no registered streams").expect("Failed to send_privmsg");
-                                } else {
-                                    client.send_privmsg(&ch, format!("Multitwitch URL: {}", &url)).expect("Failed to send_privmsg");
-                                }
 
-                            }
                         }
-                        if message.contains(client.current_nickname()) {
-                            let ch = irc_msg.response_target().unwrap_or(&channel);
-                            client.send_privmsg(&ch, "beep boop").expect("Failed send_privmsg");
-                        }
+                    }
+                    // Print a friendly message anytime someone mentions us
+                    if message.contains(client.current_nickname()) {
+                        let ch = irc_msg.response_target().unwrap_or(&channel);
+                        client.send_privmsg(&ch, "beep boop").expect("Failed send_privmsg");
                     }
                 }
-            };
-            futures::join!(reactor1);
+            }
         };
         let mut rt = tokio::runtime::Builder::new()
             .basic_scheduler()
@@ -413,36 +376,110 @@ impl RacebotStartRaceState {
             _ => None
         }
     }
+
+    fn check_racebot_response(self, source_nickname: &Option<&str>, message: &str) -> Self {
+        if *source_nickname != Some(RACEBOT) { return self; }
+        if message == "You've already started a race. Please use .setgame in the race channel if you need to set it to the correct game."{
+            return self.failed(&message);
+        }
+        let re = Regex::new(ROOM).expect("Failed to build regex");
+        let chan = re.captures(&message).map(|c| c.name("chan"));
+        let game = re.captures(&message).map(|c| c.name("game"));
+        let c = chan.and_then(std::convert::identity).unwrap();
+
+        match self {
+            RacebotStartRaceState::Waiting(_, sent_at, config) => {
+                if sent_at.elapsed() >= Duration::from_secs(RACEBOTWAIT) {
+                    println!("channel creation event arrived late");
+                    return RacebotStartRaceState::Timedout;
+                }
+                let chan = c.as_str();
+                let game = game.and_then(std::convert::identity).map(|g| g.as_str()).unwrap_or("unknown");
+                println!("chan is '{}'", chan);
+                println!("game is '{}'", game);
+                if game == config.game_name {
+                    return RacebotStartRaceState::Success(chan.to_string());
+                } else {
+                    // ignore the message from racebot, it must have been
+                    // for someone else
+                    return self
+                }
+            },
+            _ => return RacebotStartRaceState::Bad,
+        }
+    }
 }
 
-fn racebot_response(irc_msg: &irc::client::prelude::Message, message: &str, state: RacebotStartRaceState) -> RacebotStartRaceState {
-    if irc_msg.source_nickname() != Some(&RACEBOT) { return state; }
-    if message == "You've already started a race. Please use .setgame in the race channel if you need to set it to the correct game."{
-        return state.failed(&message);
-    }
-    let re = Regex::new(ROOM).expect("Failed to build regex");
-    let chan = re.captures(&message).map(|c| c.name("chan"));
-    let game = re.captures(&message).map(|c| c.name("game"));
-    let c = chan.and_then(std::convert::identity).unwrap();
+#[derive(Debug)]
+struct StartRace {
+    pending_races : VecDeque<RacebotStartRaceState>,
+    receiver: std::sync::mpsc::Receiver<(ContextWrapper,Message,RaceConfig)>,
+    send_client: irc::client::Sender,
+    to_discord: std::sync::mpsc::Sender<(ContextWrapper,String)>,
+}
 
-    match state {
-        RacebotStartRaceState::Waiting(_, sent_at, config) => {
-            if sent_at.elapsed() >= Duration::from_secs(RACEBOTWAIT) {
-                println!("channel creation event arrived late");
-                return RacebotStartRaceState::Timedout;
-            }
-            let chan = c.as_str();
-            let game = game.and_then(std::convert::identity).map(|g| g.as_str()).unwrap_or("unknown");
-            println!("chan is '{}'", chan);
-            println!("game is '{}'", game);
-            if game == config.game_name {
-                return RacebotStartRaceState::Success(chan.to_string());
-            } else {
-                // ignore the message from racebot, it must have been
-                // for someone else
-                return state;
-            }
-        },
-        _ => return RacebotStartRaceState::Bad,
+impl StartRace {
+    fn new(receiver: std::sync::mpsc::Receiver<(ContextWrapper,Message,RaceConfig)>,
+           send_client: irc::client::Sender,
+           to_discord: std::sync::mpsc::Sender<(ContextWrapper,String)>
+           ) -> Self {
+        StartRace {
+            pending_races: VecDeque::new(),
+            receiver: receiver,
+            send_client: send_client,
+            to_discord: to_discord,
+        }
     }
+
+    fn poll_discord(&mut self) {
+        use irc::client::prelude::*;
+        match self.receiver.try_recv() {
+            Err(_) => { /* TODO: should we exit or what? */}
+            Ok((ctx, _msg, config)) => {
+                println!("starting race");
+                self.pending_races.push_back(RacebotStartRaceState::Waiting(ctx.clone(), Instant::now(), config));
+                self.send_client.send(Command::PRIVMSG(SRL.to_string(), format!(".startrace {}", config.game_code))).expect("Failed to startrace");
+            }
+        }
+    }
+
+    fn update_pending_races(&mut self, irc_msg: &irc::client::prelude::Message, message: &str) {
+        let mut new_pending_races = VecDeque::new();
+        while let Some(r) = self.pending_races.pop_front() {
+            use RacebotStartRaceState::*;
+            let ctx = r.get_context();
+            let config = r.get_config();
+            let new_r = r.check_racebot_response(&irc_msg.source_nickname(), &message);
+            match new_r {
+                Waiting(_, _, _) => new_pending_races.push_back(new_r),
+                Success(chan) => {
+                    if let Some(ctx) = ctx {
+                        self.to_discord.send((ctx, format!("/join {}", &chan))).expect("failed to send to irc_message thread");
+                    }
+                    println!("joining {}", &chan);
+                    self.send_client.send_join(&chan).expect("Failed to join race channel");
+                    println!("setting goal");
+                    if let Some(config) = config {
+                        self.send_client.send_privmsg(&chan, format!(".setgoal {}",config.race_goal)).expect("Failed to setgoal");
+                    }
+                    self.send_client.send_privmsg(&chan, ".enter").expect("Failed to enter");
+                }
+                Failed(ctx, _, _, message) => {
+                    self.to_discord.send((ctx, message.to_string())).expect("Failed to send to discord");
+                }
+                Timedout => {
+                    println!("Letting discord know we failed to get a channel in time");
+                    if let Some(ctx) = ctx {
+                        self.to_discord.send((ctx, "Sorry, something went wrong. Check IRC, you might have a channel waiting.".to_string()))
+                            .expect("Failed to respond on discord");
+                    }
+                }
+                Bad => {
+                    println!("racebot waiting entered illegal state");
+                }
+            }
+        }
+        self.pending_races = new_pending_races;
+    }
+
 }
