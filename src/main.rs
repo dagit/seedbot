@@ -39,7 +39,7 @@ impl std::fmt::Debug for ContextWrapper {
 }
 
 #[group]
-#[commands(ping, startrace, roll)]
+#[commands(ping, startrace, roll, lottery)]
 struct General;
 
 struct Chan;
@@ -328,6 +328,23 @@ fn roll(ctx: &mut Context, msg: &Message) -> CommandResult {
     let seed: i32 = rand::thread_rng().gen_range(0, i32::max_value());
     let alpha_seed = convert_to_base26(seed);
     msg.reply(ctx, format!("Your seed is: {}", alpha_seed))?;
+    Ok(())
+}
+
+#[command]
+fn lottery(ctx: &mut Context, msg: &Message) -> CommandResult {
+    use rand::distributions::uniform::Uniform;
+    use rand::distributions::Distribution;
+
+    if msg.author.bot {
+        return Ok(());
+    } // Don't respond to bots
+    let tickets = msg.content.split(" ").collect::<Vec<_>>();
+    let dist = Uniform::new_inclusive(1, tickets.len()-1);
+    let mut rng = rand::thread_rng();
+    let winning_idx = dist.sample(&mut rng);
+
+    msg.reply(ctx, format!("Winner is: {}", tickets[winning_idx]))?;
     Ok(())
 }
 
