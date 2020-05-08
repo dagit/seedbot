@@ -339,12 +339,19 @@ fn lottery(ctx: &mut Context, msg: &Message) -> CommandResult {
     if msg.author.bot {
         return Ok(());
     } // Don't respond to bots
-    let tickets = msg.content.split(" ").collect::<Vec<_>>();
-    let dist = Uniform::new_inclusive(1, tickets.len()-1);
-    let mut rng = rand::thread_rng();
-    let winning_idx = dist.sample(&mut rng);
+    let tickets = msg.content.split(" ").skip(1).collect::<Vec<_>>();
+    let winning_idx = if tickets.len() > 0 {
+        let dist = Uniform::new_inclusive(0, tickets.len()-1);
+        let mut rng = rand::thread_rng();
+        Some(dist.sample(&mut rng))
+    } else {
+        None
+    };
 
-    msg.reply(ctx, format!("Winner is: {}", tickets[winning_idx]))?;
+    match winning_idx {
+        None      => msg.reply(ctx, "Invalid lottery")?,
+        Some(idx) => msg.reply(ctx, format!("Winner is: {}", tickets[idx]))?,
+    };
     Ok(())
 }
 
