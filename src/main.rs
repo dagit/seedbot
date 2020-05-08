@@ -224,7 +224,7 @@ fn main() {
 
                     // The rest of this loop is just processing individual commands from IRC
                     if message.starts_with(".entrants") {
-                        let split = message.split(" ").collect::<Vec<_>>();
+                        let split = message.split_whitespace().collect::<Vec<_>>();
                         if split.len() > 1 {
                             let entrants: Entrants = srl_http::entrants(SRL_API, &split[1])
                                 .await
@@ -339,7 +339,7 @@ fn lottery(ctx: &mut Context, msg: &Message) -> CommandResult {
     if msg.author.bot {
         return Ok(());
     } // Don't respond to bots
-    let tickets = msg.content.split(" ").skip(1).collect::<Vec<_>>();
+    let tickets = msg.content.split_whitespace().skip(1).collect::<Vec<_>>();
     let winning_idx = if tickets.len() > 0 {
         let dist = Uniform::new_inclusive(0, tickets.len()-1);
         let mut rng = rand::thread_rng();
