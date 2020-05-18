@@ -155,6 +155,8 @@ fn main() {
                 nick_password: Some(irccfg.ircpass.to_owned()),
                 server: Some("irc.speedrunslive.com".to_owned()),
                 channels: vec!["#speedrunslive".to_owned()],
+                port: Some(6667),
+                use_tls: Some(false),
                 ..irc::client::prelude::Config::default()
             };
             let mut client = Client::from_config(config)
