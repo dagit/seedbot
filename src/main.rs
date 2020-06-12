@@ -437,6 +437,7 @@ impl RacebotStartRaceState {
         let re = Regex::new(ROOM).expect("Failed to build regex");
         let chan = re.captures(&message).map(|c| c.name("chan"));
         let game = re.captures(&message).map(|c| c.name("game"));
+        if chan.is_none() { return self; }
         let c = chan.and_then(std::convert::identity).unwrap();
 
         match self {
