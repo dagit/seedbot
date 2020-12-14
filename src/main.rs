@@ -203,25 +203,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut irc_stream = client.stream().expect("failed to make irc stream");
             loop {
-                //while let Some(irc_msg) = irc_stream.next().await.transpose().expect("failed to get next message") {
                 //println!("iteration");
                 // First we check if discord has any work for us to do
                 start_race.poll_discord();
-                let next_irc_msg = irc_stream
-                    //.select_next_some()
-                    .next()
-                    .await;
-                //.expect("failed to get next message");
-                let irc_msg = match next_irc_msg {
-                    Some(m) => {
-                        //println!("{:#?}", m);
-                        m.expect("failed to get next message")
-                    }
-                    None => {
-                        //println!("none");
-                        continue;
-                    }
-                };
+                let irc_msg = irc_stream
+                    .select_next_some()
+                    .await
+                    .expect("failed to get next message");
                 //println!("{}", irc_msg);
                 let m = match irc_msg.clone().command {
                     Command::PRIVMSG(channel, message) => Some((channel, message)),
