@@ -26,7 +26,7 @@ futures = "*"
 srl_http = { git = "https://github.com/dagit/srl-http.git" }
 
 [dependencies.tokio]
-version = "*"
+version = "0.2"
 features = ["stream", "sync"]
 
 [dependencies.serenity]

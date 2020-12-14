@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serenity::async_trait;
 use serenity::client::Client;
 use serenity::framework::standard::{
     macros::{command, group},
@@ -50,8 +51,9 @@ impl TypeMapKey for Chan {
 
 struct Handler;
 
+#[async_trait]
 impl EventHandler for Handler {
-    fn ready(&self, _ctx: Context, bot: Ready) {
+    async fn ready(&self, _ctx: Context, bot: Ready) {
         println!("Connected to Discord as {}", bot.user.tag());
     }
 }
@@ -108,7 +110,7 @@ static RACECONFIGS: &'static [RaceConfig] = &[
     },
 ];
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_reader = BufReader::new(File::open("config.json").expect("Failed opening file"));
     let config: Config = serde_json::from_reader(config_reader).expect("Failed decoding config");
     let irccfg = config.clone();
@@ -120,34 +122,60 @@ fn main() {
     ) = std::sync::mpsc::channel();
 
     let discord = std::thread::spawn(move || {
-        let mut client = Client::new(&config.token, Handler).expect("Error creating client");
-        {
-            let mut data = client.data.write();
-            data.insert::<Chan>(Mutex::new(sender));
-        }
-        client.with_framework(
-            StandardFramework::new()
+        let mut rt = tokio::runtime::Builder::new()
+            .enable_all()
+            .basic_scheduler()
+            .build()
+            .expect("failed to create discord runtime");
+        let thread = async {
+            let framework = StandardFramework::new()
                 .configure(|c| c.prefix(&config.prefix))
-                .group(&GENERAL_GROUP),
-        );
+                .group(&GENERAL_GROUP);
+            let mut client = Client::builder(&config.token)
+                .event_handler(Handler)
+                .framework(framework)
+                .await
+                .expect("Error creating client");
+            {
+                let mut data = client.data.write().await;
+                data.insert::<Chan>(Mutex::new(sender));
+            }
 
-        // start listening for events by starting a single shard
-        if let Err(why) = client.start_autosharded() {
-            println!("An error occured while running the client: {:?}", why);
-        }
+            // start listening for events by starting a single shard
+            if let Err(why) = client.start_autosharded().await {
+                println!("An error occured while running the client: {:?}", why);
+            }
+        };
+        rt.block_on(thread);
     });
-    // We need a separate thread here because serenty will try to thread::sleep() and that
-    // breaks tokio (which is used by the irc library.
-    let irc_messages = std::thread::spawn(move || loop {
-        let (ctx, msg) = for_discord
-            .recv()
-            .expect("failed to get message from IRC thread");
-        ctx.channel_id
-            .say(&ctx.http, msg)
-            .expect("Failed to respond on discord");
+
+    let irc_messages = std::thread::spawn(move || {
+        let mut rt = tokio::runtime::Builder::new()
+            .enable_all()
+            .basic_scheduler()
+            .build()
+            .expect("failed to create discord runtime");
+        let thread = async {
+            loop {
+                let (ctx, msg) = for_discord
+                    .recv()
+                    .expect("failed to get message from IRC thread");
+                ctx.channel_id
+                    .say(&ctx.http, msg)
+                    .await
+                    .expect("Failed to respond on discord");
+            }
+        };
+        rt.block_on(thread);
     });
+
     let irc = std::thread::spawn(move || {
-        let thread = async move {
+        let mut rt = tokio::runtime::Builder::new()
+            .enable_all()
+            .basic_scheduler()
+            .build()
+            .expect("failed to create discord runtime");
+        let thread = async {
             use futures::prelude::*;
             use irc::client::prelude::*;
             let config = Config {
@@ -157,6 +185,8 @@ fn main() {
                 channels: vec!["#speedrunslive".to_owned()],
                 port: Some(6667),
                 use_tls: Some(false),
+                ping_time: Some(15),
+                ping_timeout: Some(30),
                 ..irc::client::prelude::Config::default()
             };
             let mut client = Client::from_config(config)
@@ -173,15 +203,26 @@ fn main() {
 
             let mut irc_stream = client.stream().expect("failed to make irc stream");
             loop {
+                //while let Some(irc_msg) = irc_stream.next().await.transpose().expect("failed to get next message") {
+                //println!("iteration");
                 // First we check if discord has any work for us to do
                 start_race.poll_discord();
-                // Next we go through the IRC messages, and to do that
-                // we do some normalization and cleanup just to make messages
-                // easier to deal with.
-                let irc_msg = irc_stream
-                    .select_next_some()
-                    .await
-                    .expect("failed to get next message");
+                let next_irc_msg = irc_stream
+                    //.select_next_some()
+                    .next()
+                    .await;
+                //.expect("failed to get next message");
+                let irc_msg = match next_irc_msg {
+                    Some(m) => {
+                        //println!("{:#?}", m);
+                        m.expect("failed to get next message")
+                    }
+                    None => {
+                        //println!("none");
+                        continue;
+                    }
+                };
+                //println!("{}", irc_msg);
                 let m = match irc_msg.clone().command {
                     Command::PRIVMSG(channel, message) => Some((channel, message)),
                     Command::NOTICE(channel, message) => Some((channel, message)),
@@ -292,49 +333,50 @@ fn main() {
                 }
             }
         };
-        let mut rt = tokio::runtime::Builder::new()
-            .basic_scheduler()
-            .enable_all()
-            .build()
-            .expect("couldn't build tokio runtime");
         rt.block_on(thread);
     });
-    irc.join().expect("irc thread exited");
-    discord.join().expect("Discord thread exited");
-    irc_messages.join().expect("irc_messages thread exited");
-}
-
-#[command]
-fn ping(ctx: &mut Context, msg: &Message) -> CommandResult {
-    if msg.author.bot {
-        return Ok(());
-    } // Don't respond to bots
-    let mut details = match msg.guild(&ctx.cache) {
-        None => "unknown guild".to_owned(),
-        Some(g) => format!("From guild with name '{}'", g.read().name),
-    };
-    details.push_str(format!("\nFrom user with display_name '{}'", msg.author.name).as_str());
-    if let Some(cname) = msg.channel_id.name(&ctx.cache) {
-        details.push_str(format!("\nFrom channel '{}'", cname).as_str());
-    }
-    msg.reply(ctx, format!("Ping received.\n{}", details))?;
+    irc.join().expect("failed to start irc thread");
+    discord.join().expect("failed to start discord thread");
+    // This has to be started after the IRC client is started
+    irc_messages
+        .join()
+        .expect("failed to start irc_messages thread");
     Ok(())
 }
 
 #[command]
-fn roll(ctx: &mut Context, msg: &Message) -> CommandResult {
+async fn ping(ctx: &Context, msg: &Message) -> CommandResult {
+    if msg.author.bot {
+        return Ok(());
+    } // Don't respond to bots
+    let mut details = match msg.guild(&ctx.cache).await {
+        None => "unknown guild".to_owned(),
+        Some(g) => format!("From guild with name '{}'", g.name),
+    };
+    details.push_str(format!("\nFrom user with display_name '{}'", msg.author.name).as_str());
+    if let Some(cname) = msg.channel_id.name(&ctx.cache).await {
+        details.push_str(format!("\nFrom channel '{}'", cname).as_str());
+    }
+    msg.reply(ctx, format!("Ping received.\n{}", details))
+        .await?;
+    Ok(())
+}
+
+#[command]
+async fn roll(ctx: &Context, msg: &Message) -> CommandResult {
     use rand::Rng;
     if msg.author.bot {
         return Ok(());
     } // Don't respond to bots
     let seed: i32 = rand::thread_rng().gen_range(0, i32::max_value());
     let alpha_seed = convert_to_base26(seed);
-    msg.reply(ctx, format!("Your seed is: {}", alpha_seed))?;
+    msg.reply(ctx, format!("Your seed is: {}", alpha_seed))
+        .await?;
     Ok(())
 }
 
 #[command]
-fn lottery(ctx: &mut Context, msg: &Message) -> CommandResult {
+async fn lottery(ctx: &Context, msg: &Message) -> CommandResult {
     use rand::distributions::uniform::Uniform;
     use rand::distributions::Distribution;
 
@@ -343,7 +385,7 @@ fn lottery(ctx: &mut Context, msg: &Message) -> CommandResult {
     } // Don't respond to bots
     let tickets = msg.content.split_whitespace().skip(1).collect::<Vec<_>>();
     let winning_idx = if tickets.len() > 0 {
-        let dist = Uniform::new_inclusive(0, tickets.len()-1);
+        let dist = Uniform::new_inclusive(0, tickets.len() - 1);
         let mut rng = rand::thread_rng();
         Some(dist.sample(&mut rng))
     } else {
@@ -351,29 +393,32 @@ fn lottery(ctx: &mut Context, msg: &Message) -> CommandResult {
     };
 
     match winning_idx {
-        None      => msg.reply(ctx, "Invalid lottery")?,
-        Some(idx) => msg.reply(ctx, format!("Winner is: {}", tickets[idx]))?,
+        None => msg.reply(ctx, "Invalid lottery").await?,
+        Some(idx) => {
+            msg.reply(ctx, format!("Winner is: {}", tickets[idx]))
+                .await?
+        }
     };
     Ok(())
 }
 
 #[command]
-fn startrace(ctx: &mut Context, msg: &Message) -> CommandResult {
+async fn startrace(ctx: &Context, msg: &Message) -> CommandResult {
     if msg.author.bot {
         return Ok(());
     } // Don't respond to bots
       // send a message to IRC
-    let mut data = ctx.data.write();
+    let mut data = ctx.data.write().await;
     let chan = data.get_mut::<Chan>().unwrap();
     let new_ctx = ContextWrapper {
         http: ctx.http.clone(),
         channel_id: msg.channel_id,
     };
-    let guild = msg.guild(&ctx.cache).map(|g| g.read().name.to_owned());
+    let guild = msg.guild(&ctx.cache).await.map(|g| g.name.to_owned());
     if let Some(guild) = guild {
         for rc in RACECONFIGS {
             if rc.guild == guild {
-                msg.reply(&ctx, "Attempting to start race...")?;
+                msg.reply(&ctx, "Attempting to start race...").await?;
                 (*chan).lock().unwrap().send((new_ctx, msg.clone(), *rc))?;
                 break;
             }
@@ -437,7 +482,9 @@ impl RacebotStartRaceState {
         let re = Regex::new(ROOM).expect("Failed to build regex");
         let chan = re.captures(&message).map(|c| c.name("chan"));
         let game = re.captures(&message).map(|c| c.name("game"));
-        if chan.is_none() { return self; }
+        if chan.is_none() {
+            return self;
+        }
         let c = chan.and_then(std::convert::identity).unwrap();
 
         match self {
